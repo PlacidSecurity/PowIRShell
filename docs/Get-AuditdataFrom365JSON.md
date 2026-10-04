@@ -9,8 +9,9 @@ schema: 2.0.0
 
 ## SYNOPSIS
 This function retrieves the audit data from the JSON files in the specified directory.
-It has been tested with output from
-the Invictus Extractor suite available here: https://github.com/invictus-ir/Microsoft-Extractor-Suite
+It has been tested with output from Get-M365UnifiedAuditLog (included in this module)
+and with the Invictus Extractor suite, since both produce the same on-disk format:
+https://github.com/invictus-ir/Microsoft-Extractor-Suite
 
 ## SYNTAX
 

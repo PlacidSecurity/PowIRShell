@@ -11,8 +11,11 @@
   **NB: The malicious activity detected by this script is entirely dependent on
   either a list of known-bad IP addresses, or the results of the IP threat intel.
  
-  The easiest way to run this script is to retrieve JSON Output from the Invictus 
-  Extractor found here: https://github.com/invictus-ir/Microsoft-Extractor-Suite.
+  The easiest way to get input for this script is Get-M365UnifiedAuditLog (included
+  in this module), which pulls UAL events directly from your tenant via
+  Search-UnifiedAuditLog and writes them in the JSON format this script expects --
+  no separate tool required. Alternatively, you can retrieve JSON output from the
+  Invictus Extractor Suite: https://github.com/invictus-ir/Microsoft-Extractor-Suite.
   The script will work with M365 logs in JSON format regardless of how they are 
   extracted. If, for example, you have CSV output, you can use the AuditData field,
   which is json.
@@ -52,7 +55,7 @@
   A future iteration of this script will put them all in an excel spreadsheet.
 
 .Parameter Searchdir
-  Specifies the directory containing stored json files. The Invictus suite will create multiple json files. 
+  Specifies the directory containing stored json files. Get-M365UnifiedAuditLog (or the Invictus Extractor Suite) will create multiple json files here. 
   ** NB Currently, you need to include the trailing slash at the end of the dir. This will be fixed in a future update.
 
 .Parameter Outputpath
@@ -103,8 +106,9 @@
 
 .PARAMETER SkipMicrosoftAllowlist
     By default, IPs belonging to Microsoft's own first-party service ranges
-    (the "Office365" Azure service tag -- Exchange Online, SharePoint Online,
-    Skype for Business/Teams endpoints) are filtered out of the unique-IP list
+    (Microsoft's published Office 365 IP address ranges -- Exchange Online,
+    SharePoint Online, Skype for Business/Teams endpoints) are filtered out of
+    the unique-IP list
     before any threat-intel lookups or the gridview, since these are commonly
     Microsoft's own backend infrastructure (mail transport hops, Defender Safe
     Links/Safe Attachments scanning, Substrate, etc.) rather than a real client.
@@ -115,8 +119,9 @@
   C:\Scripts\PowIRShell\Get-M365CompromiseInfo.ps1 -searchdir C:\Scripts\PowIRShell\Test_data\M365Output\UnifiedAuditLog\20231012092146\ -outputDir C:\Temp\365Results -ipinfoLookup -ipinfoAPIKey <ipinfoAPIKey> -IPQSLookup -ipqsAPIKey "<IPQSAPIKey>" -ScamalyticsLookup -scamalyticsAPIKey "<ScamalyticsAPIKey>" -Verbose
 
   .Inputs
-  UAL (Unified Audit Logs) from Microsoft 365 tenant.  Use Invictus Extractor for
-   this: https://github.com/invictus-ir/Microsoft-Extractor-Suite
+  UAL (Unified Audit Logs) from Microsoft 365 tenant. Use Get-M365UnifiedAuditLog
+   (included in this module) to pull these directly, or the Invictus Extractor
+   Suite: https://github.com/invictus-ir/Microsoft-Extractor-Suite
 
 .Outputs
   CSV files containing evnts of interest from the forensic perspective:

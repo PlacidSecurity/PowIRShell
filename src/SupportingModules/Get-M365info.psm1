@@ -2,7 +2,8 @@ function Get-AuditdataFrom365JSON {
   <#
   .Synopsis
     This function retrieves the audit data from the JSON files in the specified directory. It has been tested with output from
-    the Invictus Extractor suite available here: https://github.com/invictus-ir/Microsoft-Extractor-Suite
+    Get-M365UnifiedAuditLog (included in this module) and with the Invictus Extractor suite, since both produce the same
+    one-json-object-per-line on-disk format: https://github.com/invictus-ir/Microsoft-Extractor-Suite
   .Description
     This function retrieves the audit data from the JSON files in the specified directory, and returns an array of audit events.
     It's a supporting function for the Get-M365ComplianceInfo script.
