@@ -1,0 +1,33 @@
+# Runs tests/Invoke-ModuleChecks.ps1 on every pull request and every push to main.
+# To make main require these checks: GitHub > Settings > Branches > add a rule for main >
+# "Require status checks to pass before merging" > select "Module checks".
+name: Module checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only token: this workflow never writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Module checks
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      # Pinned to a full commit SHA rather than a movable tag, so a compromised tag can't change what runs here.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Encoding and import (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./tests/Invoke-ModuleChecks.ps1 -SkipAnalyzer
+
+      - name: Encoding, import and PSScriptAnalyzer (PowerShell 7)
+        shell: pwsh
+        run: ./tests/Invoke-ModuleChecks.ps1 -AnalyzerVersion 1.24.0
