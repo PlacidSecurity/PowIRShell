@@ -36,7 +36,7 @@ function Get-DehashedLookup {
     addresses.
   .Outputs
     Outputs are written to the directory specified with the outputdir parameter:
-    1. A CSV file with the lookup results — dehashedresults.csv (summary) or
+    1. A CSV file with the lookup results -- dehashedresults.csv (summary) or
        dehasheddetail.csv (-Detail), and:
     2. An error log file named dehashed_errors.txt
   #>
@@ -64,7 +64,7 @@ function Get-DehashedLookup {
     throw "No email addresses specified"
   }
 
-  # de-dupe, case-insensitive, preserve order — a client roster often has repeats
+  # de-dupe, case-insensitive, preserve order -- a client roster often has repeats
   $seen = @{}
   $uniqueEmails = @()
   foreach ($e in $emails) {
