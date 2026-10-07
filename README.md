@@ -26,6 +26,8 @@ Get-M365CompromiseInfo -searchdir C:\temp\365Comp\UAL\ -outputDir C:\temp\365Com
 ```
 Requires the `ExchangeOnlineManagement` module and a role that can read audit logs (Compliance Administrator, Security Reader, Global Reader, or View-Only Audit Logs). Use PowerShell's built-in help for full parameter details: `Get-Help Get-M365UnifiedAuditLog -ShowWindow`.
 
+Every run also writes a SHA-256 manifest and a run log (query parameters, record/page counts, connected account) to an `_manifest` subfolder of `-OutputDir`, for chain-of-custody purposes. That subfolder, and the optional `-SaveRawRecords` output, are deliberately kept out of `Get-M365CompromiseInfo -searchdir`'s view. For tenants/windows likely to exceed the 50,000-record session cap, use `-SliceHours` to split the search into smaller sessions automatically.
+
 The grid looks like this.  Select your IPs, and click OK in the gridview.
 
 ![image](https://github.com/kgeil/PowIRShell/assets/10849557/a8663036-3901-40df-9bfb-3123e3790fe4)
@@ -57,7 +59,7 @@ The script "PowerConTalk.ps1" is not really  a script, but rather  a series of u
 * Get-IPQSLookup.ps1: Input: list of IP addresses separated by newlines. Output: IP Quality Score's threat intelligence information. API Key required. Get it here: *https://www.ipqualityscore.com/*
 * Get-Scamalytics_lookup.ps1: Input: list of IP addresses separated by newlines. Output: Scamalytics threat intelligence information. API Key required. Get it here: *https://scamalytics.com/*
 * Get-M365CompromiseInfo.ps1. Use PowerShell's built-in help for usage: Get-help &lt; path-to-script &gt; -ShowWindow
-* Get-M365UnifiedAuditLog.ps1: Pulls UAL events directly from your M365 tenant via Search-UnifiedAuditLog and writes them out in the JSON format Get-M365CompromiseInfo expects, so you can skip a separate extraction tool. Requires the ExchangeOnlineManagement module and an active Connect-ExchangeOnline session. Use PowerShell's built-in help for usage: Get-help &lt; path-to-script &gt; -ShowWindow
+* Get-M365UnifiedAuditLog.ps1: Pulls UAL events directly from your M365 tenant via Search-UnifiedAuditLog and writes them out in the JSON format Get-M365CompromiseInfo expects, so you can skip a separate extraction tool. Also writes a SHA-256 manifest and run log for chain-of-custody, with optional raw-record export (-SaveRawRecords) and automatic window slicing for large pulls (-SliceHours). Requires the ExchangeOnlineManagement module and an active Connect-ExchangeOnline session. Use PowerShell's built-in help for usage: Get-help &lt; path-to-script &gt; -ShowWindow
 * PowerConTalk.ps1 Used to provide a live demo of some useful PowerShell techniques and some scripts from this repository.
 * Get-Artifacts.ps1: Parses evtx files and returns output usful in incident response triage. Use PowerShell's built-in help for usage: Get-help &lt; path-to-script &gt; -ShowWindow.
 * Get-EntraOAuthGrantInventory.ps1: Read-only inventory of OAuth2 delegated permission grants and application (app-role) permission assignments in a Microsoft Entra ID tenant, with risk flagging (MITRE T1528 illicit-consent-grant hunting) and JSON/XML/CSV output. Use PowerShell's built-in help for usage: Get-help &lt; path-to-script &gt; -ShowWindow.

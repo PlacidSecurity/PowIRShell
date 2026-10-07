@@ -29,6 +29,8 @@ Items are in suggested priority order.
 
 **Acceptance:** Every run produces JSON + manifest + run log. Re-hashing the JSON matches the manifest.
 
+**Status (2026-10-07):** Done. `_manifest\manifest.csv` (File/SHA256/Bytes/WrittenUtc) and `_manifest\<name>.runlog.json` are written every run.
+
 ## 2. Optional raw-record export
 
 **Where:** `Get-M365UnifiedAuditLog.ps1`.
@@ -39,6 +41,8 @@ Items are in suggested priority order.
 
 **Acceptance:** Raw file contains every record retrieved, field-for-field as returned, and does not interfere with `Get-M365CompromiseInfo -searchdir`.
 
+**Status (2026-10-07):** Done. `-SaveRawRecords` writes `_manifest\<name>.raw.json`; kept out of `-OutputDir` itself (not just a non-matching extension) since `Get-AuditdataFrom365JSON`'s `*.json` ingest isn't recursive -- see the cross-reference comments added in both files.
+
 ## 3. Visible handling of AuditData parse failures
 
 **Where:** `Get-M365UnifiedAuditLog.ps1`, the `foreach ($record in $allRecords)` expansion loop.
@@ -48,6 +52,8 @@ Items are in suggested priority order.
 **Change:** Count failures and report the count with `Write-Warning` (normal verbosity). Write failed records (Identity plus raw AuditData string) to `UnifiedAuditLog_<timestamp>.parsefailures.json`. Include the count in the run log.
 
 **Acceptance:** Events written + parse failures = raw records retrieved, and the run log states both numbers.
+
+**Status (2026-10-07):** Done. Failures are counted, `Write-Warning`'d, written to `_manifest\<name>.parsefailures.json`, and included in the run log.
 
 ## 4. Paging completeness and duplicate detection
 
@@ -61,6 +67,8 @@ Items are in suggested priority order.
 
 **Acceptance:** Run log shows ReportedTotal, Retrieved, Duplicates. A mismatch produces a visible warning.
 
+**Status (2026-10-07):** Done for mismatch warning + duplicate count in the run log. Not done: a de-duplicated copy as a separate file -- the doc calls that optional, so it was left out; say if you want it added.
+
 ## 5. Built-in time slicing and HighCompleteness
 
 **Where:** `Get-M365UnifiedAuditLog.ps1` parameters and main logic.
@@ -73,6 +81,8 @@ Items are in suggested priority order.
 
 **Acceptance:** A window that exceeds 50,000 records is fully retrieved without manual re-runs, and per-slice counts appear in the run log.
 
+**Status (2026-10-07):** Done. `-SliceHours` splits the window; a slice that still hits `-MaxRecords` is halved and retried automatically (up to 8 levels deep). `-HighCompleteness` passes through to `Search-UnifiedAuditLog`. This is the most structurally novel part of this change and the one most worth testing by hand against a real tenant before relying on it -- no PowerShell interpreter was available to run it during development.
+
 ## 6. Explicit UTC handling for dates
 
 **Where:** `Get-M365UnifiedAuditLog.ps1`, `StartDate` / `EndDate` parameters.
@@ -82,6 +92,8 @@ Items are in suggested priority order.
 **Change:** Treat input as UTC (e.g. convert with `[datetime]::SpecifyKind(..., 'Utc')` when Kind is Unspecified, or accept `[datetimeoffset]`). Record in the run log both the value as typed and the UTC value sent. After acquisition, record the earliest and latest event `CreationTime` and warn if they fall outside the requested window.
 
 **Acceptance:** Same input produces the same UTC window on machines in different time zones; run log shows requested window and observed event range.
+
+**Status (2026-10-07):** Done. `-StartDate`/`-EndDate` are explicitly marked UTC via `[datetime]::SpecifyKind`; the console also prints the UTC window being searched (not just the run log), and a mismatch between the requested window and the observed event CreationTime range produces a warning.
 
 ## 7. Keep secrets off the command line
 
