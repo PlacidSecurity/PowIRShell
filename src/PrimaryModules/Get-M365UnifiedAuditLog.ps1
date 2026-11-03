@@ -25,10 +25,28 @@ function Get-M365UnifiedAuditLog {
   you're not sure what your input already is.
 
   Requires the ExchangeOnlineManagement module and an active Connect-ExchangeOnline
-  session with a role that can read audit logs (e.g. Compliance Administrator, Security
-  Reader, Global Reader, or View-Only Audit Logs). This function does not connect for
-  you -- run Connect-ExchangeOnline yourself first, so you control which account/MFA
-  flow is used.
+  session whose account has the Audit Logs or View-Only Audit Logs role in Exchange
+  Online. By default those roles are in the Compliance Management and Organization
+  Management role groups. This function does not connect for you -- run
+  Connect-ExchangeOnline yourself first, so you control which account/MFA flow is used.
+
+  Import the module and call this function by name. Running this .ps1 file by path only
+  defines the function, so it stops with an error rather than appearing to succeed.
+
+  Every collection starts with read-only preflight checks (session, cmdlet availability,
+  a one-record test search, audit ingestion, and role assignment where the account can
+  read it); the results go in the run log. Use -PreflightOnly to run just those checks.
+  A rejected test search stops the run, unless ingestion is off. Ingestion being off only
+  warns and the collection is still attempted, because logs from before it was turned off
+  may still be searchable -- and it may be a finding in itself.
+  Preflight can't detect an account limited to administrative units: such an account gets
+  successful but partial results, so that check is always reported as not verified.
+
+  A search the service rejects is a failure, not an empty result. The run stops, records
+  already retrieved are saved to _manifest\<name>.partial.json (where
+  Get-M365CompromiseInfo won't ingest them as if they were complete), the run log records
+  Status = Failed, and the function throws. A search that genuinely returns nothing writes
+  a run log with Status = CompletedNoEvents and no event file.
 
   Microsoft's Search-UnifiedAuditLog session paging is documented to return a maximum of
   50,000 records per SessionId. If you expect to hit that ceiling, use -SliceHours to
@@ -93,6 +111,16 @@ function Get-M365UnifiedAuditLog {
   complete search mode). Microsoft has announced plans to change this parameter's
   behavior -- check current Search-UnifiedAuditLog documentation before relying on it.
 
+.Parameter PreflightOnly
+  Run only the read-only preflight checks and return the results. Needs no other
+  parameters and writes no files. Doesn't throw on a failed check: read the Overall
+  property (Ready, ReadyWithWarnings or NotReady).
+
+.Example
+  # Check that the connected account can search the audit log, before a real pull
+  Connect-ExchangeOnline -UserPrincipalName analyst@contoso.com
+  Get-M365UnifiedAuditLog -PreflightOnly
+
 .Example
   # Simplest form: pull one specific day's worth of events by explicit start/end date
   Connect-ExchangeOnline -UserPrincipalName analyst@contoso.com
@@ -116,9 +144,10 @@ function Get-M365UnifiedAuditLog {
   None. All parameters are explicit; the function calls Search-UnifiedAuditLog itself.
 
 .Outputs
-  None to the pipeline. Writes a single compressed JSON array file to -OutputDir, plus a
-  manifest/run log (and, optionally, raw records / parse failures) to an "_manifest"
-  subfolder of -OutputDir.
+  None to the pipeline for a collection. Writes a single compressed JSON array file to
+  -OutputDir, plus a manifest/run log (and, optionally, raw records / parse failures) to
+  an "_manifest" subfolder of -OutputDir. With -PreflightOnly, returns one object with
+  Overall, ConnectedAccount, TenantId and Checks properties and writes no files.
 
 .Notes
   Requires: ExchangeOnlineManagement module (Install-Module ExchangeOnlineManagement
@@ -127,37 +156,181 @@ function Get-M365UnifiedAuditLog {
   The run log's PowIRShellModuleVersion/GitCommit fields are best-effort: GitCommit is
   left null if git isn't installed or this copy of the module isn't a git checkout.
 #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Collect')]
     param (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Collect', Position = 0)]
         [datetime]$StartDate,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Collect', Position = 1)]
         [datetime]$EndDate,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Collect', Position = 2)]
         [string]$OutputDir,
 
+        [Parameter(ParameterSetName = 'Collect', Position = 3)]
         [string[]]$UserIds,
 
+        [Parameter(ParameterSetName = 'Collect', Position = 4)]
         [string[]]$Operations,
 
+        [Parameter(ParameterSetName = 'Collect', Position = 5)]
         [string]$RecordType,
 
+        [Parameter(ParameterSetName = 'Collect', Position = 6)]
         [ValidateRange(1, 5000)]
         [int]$ResultSize = 5000,
 
+        [Parameter(ParameterSetName = 'Collect', Position = 7)]
         [int]$MaxRecords = 50000,
 
+        [Parameter(ParameterSetName = 'Collect')]
         [switch]$SaveRawRecords,
 
+        [Parameter(ParameterSetName = 'Collect', Position = 8)]
         [int]$SliceHours = 0,
 
-        [switch]$HighCompleteness
+        [Parameter(ParameterSetName = 'Collect')]
+        [switch]$HighCompleteness,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
+        [switch]$PreflightOnly
     )
 
     $ErrorActionPreference = "Stop"
     $runStartUtc = (Get-Date).ToUniversalTime()
+
+    $searchWarnings = New-Object System.Collections.Generic.List[string]
+
+    # Internal helper, not exported: one Search-UnifiedAuditLog call. The cmdlet reports a
+    # rejected search as a warning and no records, which looks just like an empty result,
+    # so warnings have to be captured and classified. A warning that doesn't look like a
+    # failure (e.g. a deprecation notice) is kept for the run log but doesn't stop the run.
+    function Invoke-AuditLogSearch {
+        param([hashtable]$SearchParams)
+
+        $capturedWarnings = $null
+        try {
+            $searchResults = @(Search-UnifiedAuditLog @SearchParams -ErrorAction Stop -WarningVariable capturedWarnings)
+        } catch {
+            return [PSCustomObject]@{ Results = @(); Failure = $_.Exception.Message; Warnings = @() }
+        }
+
+        $warningText = @($capturedWarnings | ForEach-Object { "$_" })
+        $failureText = @($warningText | Where-Object { $_ -match 'fail|error|bad ?request|denied|unauthori[sz]ed|forbidden|time[d ]?-? ?out|throttl' })
+
+        return [PSCustomObject]@{
+            Results  = $searchResults
+            Failure  = $(if ($failureText.Count -gt 0) { $failureText -join ' | ' } else { $null })
+            Warnings = $warningText
+        }
+    }
+
+    # Internal helper, not exported: read-only checks that the connected session can search
+    # the audit log. Status is Pass, Warn, Fail, Unknown (this account can't read the
+    # setting) or NotVerified (no check available here). Only Pass/Warn/Fail affect Overall.
+    function Invoke-UalPreflight {
+        $checks = New-Object System.Collections.Generic.List[object]
+        $account = $null
+        $tenant = $null
+        $eopConnected = $false
+
+        $addCheck = {
+            param($Name, $Status, $Detail)
+            $checks.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
+        }
+
+        $sessionOk = $false
+        if (-not (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue)) {
+            & $addCheck 'Session' 'Fail' 'ExchangeOnlineManagement v3 or later is not available. Run: Install-Module ExchangeOnlineManagement -Scope CurrentUser; then Connect-ExchangeOnline.'
+        } else {
+            $connections = @()
+            try { $connections = @(Get-ConnectionInformation -ErrorAction Stop) } catch { $connections = @() }
+            $eopConnected = @($connections | Where-Object { $_.IsEopSession }).Count -gt 0
+            $exoSession = @($connections | Where-Object { $_.State -eq 'Connected' -and -not $_.IsEopSession }) | Select-Object -First 1
+            if ($exoSession) {
+                $sessionOk = $true
+                $account = $exoSession.UserPrincipalName
+                $tenant = $exoSession.TenantID
+                & $addCheck 'Session' 'Pass' "Connected to Exchange Online as $account (tenant $tenant)."
+            } else {
+                & $addCheck 'Session' 'Fail' 'No active Exchange Online session. Run Connect-ExchangeOnline first (Connect-IPPSSession alone is not enough).'
+            }
+        }
+
+        $cmdletOk = $false
+        if ($sessionOk) {
+            if (Get-Command Search-UnifiedAuditLog -ErrorAction SilentlyContinue) {
+                $cmdletOk = $true
+                & $addCheck 'Cmdlet' 'Pass' 'Search-UnifiedAuditLog is available in this session.'
+            } else {
+                & $addCheck 'Cmdlet' 'Fail' "Search-UnifiedAuditLog is not available in this session. The account probably lacks the Audit Logs or View-Only Audit Logs role in Exchange Online, or the session was opened with a -CommandName list that leaves it out."
+            }
+        }
+
+        if ($cmdletOk) {
+            $probeEndUtc = (Get-Date).ToUniversalTime()
+            $probe = Invoke-AuditLogSearch -SearchParams @{ StartDate = $probeEndUtc.AddDays(-1); EndDate = $probeEndUtc; ResultSize = 1 }
+            if ($probe.Failure) {
+                & $addCheck 'TestSearch' 'Fail' "The audit search was rejected: $($probe.Failure)"
+            } elseif ($probe.Results.Count -gt 0) {
+                & $addCheck 'TestSearch' 'Pass' 'A one-record test search of the last 24 hours returned a record.'
+            } else {
+                & $addCheck 'TestSearch' 'Warn' 'Search accepted, but no records in the last 24 hours. That could be a quiet tenant, a limited scope, or logging being off, so it does not prove access.'
+            }
+
+            if ($eopConnected) {
+                & $addCheck 'Ingestion' 'Unknown' 'A Security & Compliance session is also connected, and its Get-AdminAuditLogConfig always reports False. Check this from a window connected only to Exchange Online.'
+            } elseif (Get-Command Get-AdminAuditLogConfig -ErrorAction SilentlyContinue) {
+                try {
+                    $ingestionEnabled = (Get-AdminAuditLogConfig -ErrorAction Stop).UnifiedAuditLogIngestionEnabled
+                    if ($ingestionEnabled) {
+                        & $addCheck 'Ingestion' 'Pass' 'UnifiedAuditLogIngestionEnabled is True.'
+                    } else {
+                        & $addCheck 'Ingestion' 'Warn' 'UnifiedAuditLogIngestionEnabled is False: no new events are being logged. Logs from before it was turned off may still be searchable. Record this as a possible finding before changing it.'
+                    }
+                } catch {
+                    & $addCheck 'Ingestion' 'Unknown' "This account could not read the setting: $($_.Exception.Message)"
+                }
+            } else {
+                & $addCheck 'Ingestion' 'Unknown' 'Get-AdminAuditLogConfig is not available to this account.'
+            }
+
+            if ($account -and (Get-Command Get-ManagementRoleEntry -ErrorAction SilentlyContinue) -and (Get-Command Get-ManagementRoleAssignment -ErrorAction SilentlyContinue)) {
+                try {
+                    $grantingRoles = @(Get-ManagementRoleEntry '*\Search-UnifiedAuditLog' -ErrorAction Stop | ForEach-Object { "$($_.Role)" } | Select-Object -Unique)
+                    $heldRoles = @(Get-ManagementRoleAssignment -RoleAssignee $account -Delegating $false -Enabled $true -ErrorAction Stop |
+                        ForEach-Object { "$($_.Role)" } | Where-Object { $grantingRoles -contains $_ } | Select-Object -Unique)
+                    if ($heldRoles.Count -gt 0) {
+                        & $addCheck 'Roles' 'Pass' "Roles granting the search: $($heldRoles -join ', ')."
+                    } else {
+                        & $addCheck 'Roles' 'Unknown' 'No granting role was found through this lookup. Rely on the test search result instead.'
+                    }
+                } catch {
+                    & $addCheck 'Roles' 'Unknown' "This account could not read role assignments: $($_.Exception.Message)"
+                }
+            } else {
+                & $addCheck 'Roles' 'Unknown' 'This account cannot read role assignments, which is normal for a view-only account.'
+            }
+
+            & $addCheck 'AdminUnitScope' 'NotVerified' 'Not checked. An admin restricted to administrative units gets successful but partial results and misses non-user and system logs. Confirm the account is unrestricted.'
+        }
+
+        $statuses = @($checks | ForEach-Object { $_.Status })
+        $overall = if ($statuses -contains 'Fail') { 'NotReady' } elseif ($statuses -contains 'Warn') { 'ReadyWithWarnings' } else { 'Ready' }
+
+        foreach ($check in $checks) {
+            $checkColor = switch ($check.Status) { 'Pass' { 'Green' } 'Fail' { 'Red' } 'Warn' { 'Yellow' } default { 'Cyan' } }
+            Write-Host ("  [{0}] {1}: {2}" -f $check.Status, $check.Name, $check.Detail) -ForegroundColor $checkColor
+        }
+        Write-Host "  Preflight result: $overall" -ForegroundColor $(if ($overall -eq 'NotReady') { 'Red' } elseif ($overall -eq 'Ready') { 'Green' } else { 'Yellow' })
+
+        return [PSCustomObject]@{
+            Overall          = $overall
+            ConnectedAccount = $account
+            TenantId         = $tenant
+            Checks           = $checks.ToArray()
+        }
+    }
 
     # Internal helper, not exported: pages through Search-UnifiedAuditLog for one UTC
     # window, halving and retrying the window if the -MaxRecords cap is hit so a single
@@ -173,6 +346,7 @@ function Get-M365UnifiedAuditLog {
         $windowRecords = New-Object System.Collections.Generic.List[object]
         $page = 0
         $reportedTotal = $null
+        $windowFailure = $null
 
         do {
             $page++
@@ -189,9 +363,17 @@ function Get-M365UnifiedAuditLog {
             if ($HighCompleteness) { $searchParams["HighCompleteness"] = $true }
 
             Write-Verbose "Requesting page $page for window $WindowStartUtc to $WindowEndUtc (session $sessionId)..."
-            $results = Search-UnifiedAuditLog @searchParams
+            $searchOutcome = Invoke-AuditLogSearch -SearchParams $searchParams
+            foreach ($w in $searchOutcome.Warnings) { $searchWarnings.Add($w) }
+            $results = @($searchOutcome.Results)
 
-            if (-not $results -or $results.Count -eq 0) { break }
+            if ($searchOutcome.Failure) {
+                $windowFailure = "Search failed for window $($WindowStartUtc.ToString('o')) to $($WindowEndUtc.ToString('o')) on page ${page}: $($searchOutcome.Failure)"
+                foreach ($r in $results) { $windowRecords.Add($r) }
+                break
+            }
+
+            if ($results.Count -eq 0) { break }
 
             if ($null -eq $reportedTotal -and $results[0].PSObject.Properties['ResultCount']) {
                 $reportedTotal = $results[0].ResultCount
@@ -205,19 +387,39 @@ function Get-M365UnifiedAuditLog {
         $hitCap = $windowRecords.Count -ge $MaxRecords
         $windowSpan = $WindowEndUtc - $WindowStartUtc
 
+        if ($windowFailure) {
+            return [PSCustomObject]@{
+                Records          = $windowRecords
+                ReportedTotal    = $null
+                HitCapUnresolved = $hitCap
+                Pages            = $page
+                Failure          = $windowFailure
+            }
+        }
+
         if ($hitCap -and $windowSpan.TotalMinutes -gt 2 -and $Depth -lt 8) {
             $midpoint = $WindowStartUtc.AddTicks([int64]($windowSpan.Ticks / 2))
             Write-Host "  Window $WindowStartUtc to $WindowEndUtc hit the $MaxRecords cap -- subdividing and retrying." -ForegroundColor Yellow
             $firstHalf = Get-AuditLogWindowRecords -WindowStartUtc $WindowStartUtc -WindowEndUtc $midpoint -Depth ($Depth + 1)
-            $secondHalf = Get-AuditLogWindowRecords -WindowStartUtc $midpoint -WindowEndUtc $WindowEndUtc -Depth ($Depth + 1)
             $combinedRecords = New-Object System.Collections.Generic.List[object]
             foreach ($r in $firstHalf.Records) { $combinedRecords.Add($r) }
+            if ($firstHalf.Failure) {
+                return [PSCustomObject]@{
+                    Records          = $combinedRecords
+                    ReportedTotal    = $null
+                    HitCapUnresolved = $firstHalf.HitCapUnresolved
+                    Pages            = $page + $firstHalf.Pages
+                    Failure          = $firstHalf.Failure
+                }
+            }
+            $secondHalf = Get-AuditLogWindowRecords -WindowStartUtc $midpoint -WindowEndUtc $WindowEndUtc -Depth ($Depth + 1)
             foreach ($r in $secondHalf.Records) { $combinedRecords.Add($r) }
             return [PSCustomObject]@{
                 Records          = $combinedRecords
                 ReportedTotal    = $null
                 HitCapUnresolved = ($firstHalf.HitCapUnresolved -or $secondHalf.HitCapUnresolved)
                 Pages            = $page + $firstHalf.Pages + $secondHalf.Pages
+                Failure          = $secondHalf.Failure
             }
         }
 
@@ -230,22 +432,29 @@ function Get-M365UnifiedAuditLog {
             ReportedTotal    = $reportedTotal
             HitCapUnresolved = $hitCap
             Pages            = $page
+            Failure          = $null
         }
     }
 
-    if (-not (Get-Command Search-UnifiedAuditLog -ErrorAction SilentlyContinue)) {
-        Write-Host "Search-UnifiedAuditLog isn't available. Install and import ExchangeOnlineManagement:" -ForegroundColor Red
-        Write-Host "  Install-Module ExchangeOnlineManagement -Scope CurrentUser" -ForegroundColor Yellow
-        Write-Host "  Connect-ExchangeOnline -UserPrincipalName <you@yourtenant.com>" -ForegroundColor Yellow
-        return
+    $powIRShellModule = Get-Module -Name M365CompromiseInfo | Select-Object -First 1
+    if ($powIRShellModule) {
+        Write-Host "PowIRShell module $($powIRShellModule.Version) loaded from $($powIRShellModule.ModuleBase)" -ForegroundColor Cyan
+    } else {
+        Write-Host "PowIRShell module not loaded (function was dot-sourced); version and path won't be recorded." -ForegroundColor Cyan
     }
 
-    $connectionInfo = $null
-    try {
-        $connectionInfo = Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1
-    } catch {
-        Write-Host "No active Exchange Online session found. Run Connect-ExchangeOnline first, then try again." -ForegroundColor Red
-        return
+    Write-Host "Running preflight checks..." -ForegroundColor Green
+    $preflight = Invoke-UalPreflight
+
+    if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
+        return $preflight
+    }
+
+    # With no usable session there's no tenant to document, so stop before creating folders.
+    $preventingChecks = @($preflight.Checks | Where-Object { $_.Status -eq 'Fail' })
+    $sessionBlocked = @($preventingChecks | Where-Object { $_.Name -in 'Session', 'Cmdlet' })
+    if ($sessionBlocked.Count -gt 0) {
+        throw "Cannot search the Unified Audit Log. $($sessionBlocked[0].Detail)"
     }
 
     if (-not (Test-Path $OutputDir)) {
@@ -268,6 +477,12 @@ function Get-M365UnifiedAuditLog {
     if ($StartDate.Kind -ne [System.DateTimeKind]::Utc -or $EndDate.Kind -ne [System.DateTimeKind]::Utc) {
         Write-Host "Note: -StartDate/-EndDate carried no timezone -- treating both as UTC, not local time." -ForegroundColor Cyan
     }
+    if ($endDateUtc -gt (Get-Date).ToUniversalTime()) {
+        $futureEndMessage = "-EndDate $($endDateUtc.ToString('o')) is in the future. The service may reject this search."
+        Write-Warning $futureEndMessage
+        $searchWarnings.Add($futureEndMessage)
+    }
+
     Write-Host "Searching Unified Audit Log from $($startDateUtc.ToString('o')) to $($endDateUtc.ToString('o')) (UTC)..." -ForegroundColor Green
 
     $slices = New-Object System.Collections.Generic.List[hashtable]
@@ -288,6 +503,19 @@ function Get-M365UnifiedAuditLog {
     $sliceSummaries = New-Object System.Collections.Generic.List[object]
     $sliceNum = 0
     $totalPages = 0
+    $runFailure = $null
+
+    # With ingestion off, a rejected test search doesn't rule out older logs, and an attacker
+    # may be the one who turned it off. Try the real search; it fails loudly if rejected too.
+    $ingestionOff = @($preflight.Checks | Where-Object { $_.Name -eq 'Ingestion' -and $_.Status -eq 'Warn' }).Count -gt 0
+    if ($ingestionOff) {
+        $preventingChecks = @($preventingChecks | Where-Object { $_.Name -ne 'TestSearch' })
+    }
+
+    if ($preventingChecks.Count -gt 0) {
+        $runFailure = "Preflight failed. $($preventingChecks[0].Detail)"
+        $slices.Clear()
+    }
 
     foreach ($slice in $slices) {
         $sliceNum++
@@ -301,13 +529,14 @@ function Get-M365UnifiedAuditLog {
             RecordsRetrieved = $sliceResult.Records.Count
             ReportedTotal    = $sliceResult.ReportedTotal
             HitCapUnresolved = $sliceResult.HitCapUnresolved
+            Failure          = $sliceResult.Failure
         })
         Write-Host "Slice $sliceNum/$($slices.Count): $($sliceResult.Records.Count) records ($($slice.Start.ToString('o')) to $($slice.End.ToString('o')))." -ForegroundColor Yellow
-    }
-
-    if ($allRecords.Count -eq 0) {
-        Write-Host "No events found for that search." -ForegroundColor Yellow
-        return
+        if ($sliceResult.Failure) {
+            $runFailure = $sliceResult.Failure
+            Write-Host "  $runFailure" -ForegroundColor Red
+            break
+        }
     }
 
     $reportedTotalSum = 0
@@ -320,7 +549,7 @@ function Get-M365UnifiedAuditLog {
     }
 
     $duplicateCount = 0
-    $identityGroups = $allRecords | Group-Object -Property Identity
+    $identityGroups = @($allRecords | Group-Object -Property Identity)
     foreach ($g in $identityGroups) {
         if ($g.Count -gt 1) { $duplicateCount += ($g.Count - 1) }
     }
@@ -328,10 +557,12 @@ function Get-M365UnifiedAuditLog {
         Write-Warning "Found $duplicateCount duplicate record(s) by Identity across pages/slices. All records are kept in the output; see the run log for the count."
     }
 
-    Write-Host "Retrieved $($allRecords.Count) raw audit records. Expanding AuditData..." -ForegroundColor Green
+    if ($allRecords.Count -gt 0) {
+        Write-Host "Retrieved $($allRecords.Count) raw audit records. Expanding AuditData..." -ForegroundColor Green
+    }
 
     $parseFailures = New-Object System.Collections.Generic.List[object]
-    $expandedEvents = foreach ($record in $allRecords) {
+    $expandedEvents = @(foreach ($record in $allRecords) {
         try {
             $record.AuditData | ConvertFrom-Json
         } catch {
@@ -341,17 +572,21 @@ function Get-M365UnifiedAuditLog {
                 AuditData = $record.AuditData
             })
         }
-    }
+    })
 
     if ($parseFailures.Count -gt 0) {
         Write-Warning "$($parseFailures.Count) record(s) had AuditData that failed to parse and were omitted from the output. See _manifest\*.parsefailures.json."
     }
 
     $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-    $outFile = Join-Path $OutputDir "UnifiedAuditLog_$timestamp.json"
-    # -Compress keeps this a single line, matching the Invictus Extractor output format
-    # that Get-AuditdataFrom365JSON expects (it reads each *.json file line by line).
-    @($expandedEvents) | ConvertTo-Json -Depth 20 -Compress | Out-File -FilePath $outFile -Encoding utf8 -Force
+    $outFile = $null
+    if ($expandedEvents.Count -gt 0) {
+        # A failed run's records go in _manifest so they can't be ingested as a complete set.
+        $outFile = if ($runFailure) { Join-Path $manifestDir "UnifiedAuditLog_$timestamp.partial.json" } else { Join-Path $OutputDir "UnifiedAuditLog_$timestamp.json" }
+        # -Compress keeps this a single line, matching the Invictus Extractor output format
+        # that Get-AuditdataFrom365JSON expects (it reads each *.json file line by line).
+        ConvertTo-Json -InputObject $expandedEvents -Depth 20 -Compress | Out-File -FilePath $outFile -Encoding utf8 -Force
+    }
 
     $earliestEvent = $null
     $latestEvent = $null
@@ -369,28 +604,30 @@ function Get-M365UnifiedAuditLog {
     }
 
     $rawFile = $null
-    if ($SaveRawRecords) {
+    if ($SaveRawRecords -and $allRecords.Count -gt 0) {
         $rawFile = Join-Path $manifestDir "UnifiedAuditLog_$timestamp.raw.json"
-        @($allRecords) | ConvertTo-Json -Depth 20 -Compress | Out-File -FilePath $rawFile -Encoding utf8 -Force
+        ConvertTo-Json -InputObject @($allRecords) -Depth 20 -Compress | Out-File -FilePath $rawFile -Encoding utf8 -Force
     }
 
     $parseFailuresFile = $null
     if ($parseFailures.Count -gt 0) {
         $parseFailuresFile = Join-Path $manifestDir "UnifiedAuditLog_$timestamp.parsefailures.json"
-        @($parseFailures) | ConvertTo-Json -Depth 10 -Compress | Out-File -FilePath $parseFailuresFile -Encoding utf8 -Force
+        ConvertTo-Json -InputObject @($parseFailures) -Depth 10 -Compress | Out-File -FilePath $parseFailuresFile -Encoding utf8 -Force
     }
 
-    $outputHash = (Get-FileHash -Path $outFile -Algorithm SHA256).Hash
-    $outputBytes = (Get-Item $outFile).Length
+    $outputHash = $null
     $runEndUtc = (Get-Date).ToUniversalTime()
 
     $manifestRows = New-Object System.Collections.Generic.List[object]
-    $manifestRows.Add([PSCustomObject]@{
-        File       = (Split-Path $outFile -Leaf)
-        SHA256     = $outputHash
-        Bytes      = $outputBytes
-        WrittenUtc = $runEndUtc.ToString('o')
-    })
+    if ($outFile) {
+        $outputHash = (Get-FileHash -Path $outFile -Algorithm SHA256).Hash
+        $manifestRows.Add([PSCustomObject]@{
+            File       = (Split-Path $outFile -Leaf)
+            SHA256     = $outputHash
+            Bytes      = (Get-Item $outFile).Length
+            WrittenUtc = $runEndUtc.ToString('o')
+        })
+    }
 
     if ($rawFile) {
         $manifestRows.Add([PSCustomObject]@{
@@ -410,7 +647,18 @@ function Get-M365UnifiedAuditLog {
         })
     }
 
-    $powIRShellModule = Get-Module -Name M365CompromiseInfo | Select-Object -First 1
+    $capUnresolved = @($sliceSummaries | Where-Object { $_.HitCapUnresolved }).Count -gt 0
+    $countMismatch = $reportedTotalKnown -and $reportedTotalSum -ne $allRecords.Count
+    $runStatus = if ($runFailure) {
+        'Failed'
+    } elseif ($expandedEvents.Count -eq 0 -and $parseFailures.Count -eq 0) {
+        'CompletedNoEvents'
+    } elseif ($capUnresolved -or $countMismatch -or $parseFailures.Count -gt 0 -or $searchWarnings.Count -gt 0 -or $preflight.Overall -ne 'Ready') {
+        'CompletedWithWarnings'
+    } else {
+        'Completed'
+    }
+
     $gitCommit = $null
     try {
         if ($powIRShellModule -and $powIRShellModule.ModuleBase) {
@@ -421,6 +669,10 @@ function Get-M365UnifiedAuditLog {
     $exoModule = Get-Module -Name ExchangeOnlineManagement | Select-Object -First 1
 
     $runLog = [ordered]@{
+        Status                        = $runStatus
+        FailureReason                 = $runFailure
+        SearchWarnings                = $searchWarnings.ToArray()
+        Preflight                     = $preflight
         RunStartUtc                   = $runStartUtc.ToString('o')
         RunEndUtc                     = $runEndUtc.ToString('o')
         RequestedStartDateRaw         = $inputStartDateRaw
@@ -443,15 +695,16 @@ function Get-M365UnifiedAuditLog {
         DuplicateRecords               = $duplicateCount
         EventsExpanded                 = $expandedEvents.Count
         ParseFailures                  = $parseFailures.Count
-        MaxRecordsCapHitUnresolved     = ($sliceSummaries | Where-Object { $_.HitCapUnresolved }).Count -gt 0
-        ConnectedAccount                = $connectionInfo.UserPrincipalName
-        TenantId                        = $connectionInfo.TenantId
+        MaxRecordsCapHitUnresolved     = $capUnresolved
+        ConnectedAccount                = $preflight.ConnectedAccount
+        TenantId                        = $preflight.TenantId
         ExchangeOnlineManagementVersion = $(if ($exoModule) { $exoModule.Version.ToString() } else { $null })
         PowIRShellModuleVersion          = $(if ($powIRShellModule) { $powIRShellModule.Version.ToString() } else { $null })
+        PowIRShellModulePath             = $(if ($powIRShellModule) { $powIRShellModule.ModuleBase } else { $null })
         GitCommit                       = $gitCommit
         PowerShellVersion               = $PSVersionTable.PSVersion.ToString()
         MachineName                     = [System.Environment]::MachineName
-        OutputFile                      = (Split-Path $outFile -Leaf)
+        OutputFile                      = $(if ($outFile) { Split-Path $outFile -Leaf } else { $null })
         OutputFileSHA256                = $outputHash
         RawRecordsFile                  = $(if ($rawFile) { (Split-Path $rawFile -Leaf) } else { $null })
         ParseFailuresFile               = $(if ($parseFailuresFile) { (Split-Path $parseFailuresFile -Leaf) } else { $null })
@@ -470,7 +723,26 @@ function Get-M365UnifiedAuditLog {
     $manifestCsvPath = Join-Path $manifestDir "manifest.csv"
     $manifestRows | Export-Csv -Path $manifestCsvPath -Append -NoTypeInformation -Encoding utf8
 
-    Write-Host "Wrote $($expandedEvents.Count) events to $outFile" -ForegroundColor Green
     Write-Host "Manifest and run log written to $manifestDir" -ForegroundColor Cyan
+
+    if ($runFailure) {
+        $partialNote = if ($outFile) { " $($expandedEvents.Count) event(s) retrieved before the failure were saved to $outFile and are incomplete." } else { " No events were saved." }
+        throw "Unified Audit Log collection failed. $runFailure$partialNote See $runLogFile"
+    }
+
+    if ($runStatus -eq 'CompletedNoEvents') {
+        Write-Host "The search completed and returned no events, so no event file was written. Check the preflight results above before treating this as a clean result. Run log: $runLogFile" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "Wrote $($expandedEvents.Count) events to $outFile" -ForegroundColor Green
     Write-Host "Pass -searchdir $OutputDir\ to Get-M365CompromiseInfo to analyze these events." -ForegroundColor Cyan
+}
+
+# Running this file by path defines the function in a temporary scope and then discards it,
+# and PowerShell silently ignores any parameters given to the script. Without this check that
+# looks like a successful run that collected nothing. Importing the module or dot-sourcing
+# this file both skip it.
+if (-not $ExecutionContext.SessionState.Module -and $MyInvocation.InvocationName -ne '.') {
+    throw "Get-M365UnifiedAuditLog.ps1 only defines a function, so running it by path collects nothing. From the PowIRShell folder, run: Import-Module .\M365CompromiseInfo.psd1 -Force ; then call Get-M365UnifiedAuditLog with your parameters."
 }

@@ -14,11 +14,17 @@ have to run a separate extraction tool (e.g. the Invictus Extractor Suite) first
 
 ## SYNTAX
 
+### Collect (Default)
 ```
 Get-M365UnifiedAuditLog [-StartDate] <DateTime> [-EndDate] <DateTime> [-OutputDir] <String>
  [[-UserIds] <String[]>] [[-Operations] <String[]>] [[-RecordType] <String>]
  [[-ResultSize] <Int32>] [[-MaxRecords] <Int32>] [-SaveRawRecords] [[-SliceHours] <Int32>]
  [-HighCompleteness] [<CommonParameters>]
+```
+
+### Preflight
+```
+Get-M365UnifiedAuditLog -PreflightOnly [<CommonParameters>]
 ```
 
 ## DESCRIPTION
@@ -36,9 +42,37 @@ retrieved events to the pipeline. Use Get-AuditdataFrom365JSON or
 Get-M365CompromiseInfo to read the output back for analysis.
 
 -StartDate/-EndDate are treated as UTC, not local time. Requires the
-ExchangeOnlineManagement module and an active Connect-ExchangeOnline session with
-a role that can read audit logs (e.g. Compliance Administrator, Security Reader,
-Global Reader, or View-Only Audit Logs). This function does not connect for you.
+ExchangeOnlineManagement module and an active Connect-ExchangeOnline session whose
+account has the Audit Logs or View-Only Audit Logs role in Exchange Online. By
+default those roles are in the Compliance Management and Organization Management
+role groups. This function does not connect for you.
+
+Import the module and call this function by name. Running the .ps1 file by path
+only defines the function, so it stops with an error rather than appearing to
+succeed.
+
+Every collection starts with read-only preflight checks, recorded in the run log:
+
+| Check | Fails, warns or stays unknown when |
+| --- | --- |
+| Session | Fails with no active Exchange Online session |
+| Cmdlet | Fails if Search-UnifiedAuditLog isn't available to the session |
+| TestSearch | Fails if a one-record search is rejected; warns if it returns nothing |
+| Ingestion | Warns if UnifiedAuditLogIngestionEnabled is False; unknown if unreadable |
+| Roles | Unknown if the account can't read role assignments (normal for view-only) |
+| AdminUnitScope | Always NotVerified |
+
+A failed check stops the run, except a rejected test search when ingestion is off.
+Ingestion being off only warns and the collection is still attempted, because logs
+from before it was turned off may still be searchable. Preflight can't detect an account
+restricted to administrative units, which gets successful but partial results, so
+confirm the account is unrestricted yourself.
+
+A search the service rejects is a failure, not an empty result. The run stops, any
+records already retrieved are saved to _manifest\<name>.partial.json (where
+Get-M365CompromiseInfo won't ingest them as complete), and the function throws. The
+run log's Status is one of Completed, CompletedWithWarnings, CompletedNoEvents or
+Failed. CompletedNoEvents writes a run log and manifest but no event file.
 
 Every run also writes a SHA-256 manifest and a run log (query parameters, page and
 record counts, duplicate/parse-failure counts, connected account and tenant,
@@ -81,6 +115,15 @@ PS C:\> Get-M365UnifiedAuditLog -StartDate '2026-09-01' -EndDate '2026-09-08' `
 Narrows to logon events for one user over a week-long window, splitting the
 search into 24-hour slices and also saving the unmodified wrapper records.
 
+### Example 4
+```powershell
+PS C:\> Connect-ExchangeOnline -UserPrincipalName analyst@contoso.com
+PS C:\> Get-M365UnifiedAuditLog -PreflightOnly
+```
+
+Checks whether the connected account can search the audit log, without collecting
+anything or writing any files.
+
 ## PARAMETERS
 
 ### -StartDate
@@ -89,7 +132,7 @@ UTC value regardless of the Kind on the value you pass in.
 
 ```yaml
 Type: DateTime
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: True
@@ -105,7 +148,7 @@ UTC value regardless of the Kind on the value you pass in.
 
 ```yaml
 Type: DateTime
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: True
@@ -122,7 +165,7 @@ Get-M365CompromiseInfo.
 
 ```yaml
 Type: String
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: True
@@ -137,7 +180,7 @@ Optional. One or more UPNs to restrict the search to.
 
 ```yaml
 Type: String[]
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -153,7 +196,7 @@ UserLoggedIn, MailItemsAccessed). Omit to retrieve all operations.
 
 ```yaml
 Type: String[]
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -169,7 +212,7 @@ AzureActiveDirectoryStsLogon).
 
 ```yaml
 Type: String
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -185,7 +228,7 @@ Records per page passed to Search-UnifiedAuditLog. Default and Microsoft's max i
 
 ```yaml
 Type: Int32
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -202,7 +245,7 @@ session. A slice that hits this cap is automatically halved and retried.
 
 ```yaml
 Type: Int32
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -219,7 +262,7 @@ _manifest\<name>.raw.json.
 
 ```yaml
 Type: SwitchParameter
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -236,7 +279,7 @@ window.
 
 ```yaml
 Type: Int32
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
@@ -253,10 +296,27 @@ parameter's behavior.
 
 ```yaml
 Type: SwitchParameter
-Parameter Sets: (All)
+Parameter Sets: Collect
 Aliases:
 
 Required: False
+Position: Named
+Default value: False
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -PreflightOnly
+Run only the read-only preflight checks and return the results. Needs no other
+parameters and writes no files. Doesn't throw on a failed check: read the Overall
+property (Ready, ReadyWithWarnings or NotReady).
+
+```yaml
+Type: SwitchParameter
+Parameter Sets: Preflight
+Aliases:
+
+Required: True
 Position: Named
 Default value: False
 Accept pipeline input: False
@@ -271,9 +331,10 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 ### None. All parameters are explicit; the function calls Search-UnifiedAuditLog itself.
 ## OUTPUTS
 
-### None to the pipeline. Writes a single compressed JSON array file to -OutputDir,
-### plus a manifest/run log (and, optionally, raw records / parse failures) to an
-### "_manifest" subfolder of -OutputDir.
+### None to the pipeline for a collection. Writes a single compressed JSON array file
+### to -OutputDir, plus a manifest/run log (and, optionally, raw records / parse
+### failures) to an "_manifest" subfolder of -OutputDir. With -PreflightOnly, returns
+### one object with Overall, ConnectedAccount, TenantId and Checks properties.
 ## NOTES
 Requires: ExchangeOnlineManagement module (Install-Module ExchangeOnlineManagement
 -Scope CurrentUser) and an active Connect-ExchangeOnline session.

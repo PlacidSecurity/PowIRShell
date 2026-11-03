@@ -173,3 +173,11 @@ Items are in suggested priority order.
 - Add or extend Pester tests where practical: manifest hash matches file, run log fields present, parse-failure accounting, duplicate detection, UTC window conversion, UpdateInboxRules parsing, Set-Mailbox and transport rule capture.
 - Add sample events to `Test_data` for UpdateInboxRules, Set-Mailbox forwarding and New-TransportRule (sanitized).
 - Re-run against the existing `Test_data\M365Output` set and confirm existing CSV outputs are unchanged apart from new columns.
+
+---
+
+## Preflight checks and failed-search handling
+
+**Where:** `Get-M365UnifiedAuditLog.ps1`.
+
+**Status (2026-11-03):** Done on `feature/ual-forensic-manifest`, tested only with mocked cmdlets. Added `-PreflightOnly` and preflight on every run, an error when the `.ps1` is run by path, failed searches reported as failures (with partial records kept in `_manifest`), and a run log for zero-result runs. Confirm against a real tenant that a rejected search's warning is captured through `-WarningVariable`. Open gap: an account restricted to administrative units is not detected.
