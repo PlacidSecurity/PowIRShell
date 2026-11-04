@@ -26,6 +26,10 @@ function Get-AuditdataFrom365JSON {
       $searchdir = $searchdir -replace "\\$",""
   }
 
+  # Non-recursive by design (see .Inputs above). Get-M365UnifiedAuditLog relies on this:
+  # it writes its manifest, run log, raw records and parse-failure files to a "_manifest"
+  # subfolder of its -OutputDir specifically so they're never picked up here. If this ever
+  # grows a -Recurse, update Get-M365UnifiedAuditLog.ps1's isolation comment too.
   $jsonfiles = Get-ChildItem -Path $searchdir -Filter *.json
   Write-Host "There are $($jsonfiles.count) JSON files to process" -ForegroundColor Green
   if ($jsonfiles.count -eq 0) {
